@@ -1,29 +1,32 @@
 import argparse
-import os 
-import numpy as np
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+import os
 from importlib.metadata import version
 
-from lib.prune import prune_wanda, prune_magnitude, prune_sparsegpt, prune_ablate, check_sparsity, find_layers
+import numpy as np
+import torch
 from lib.eval import eval_ppl, eval_zero_shot
+from lib.prune import (check_sparsity, find_layers, prune_ablate,
+                       prune_magnitude, prune_sparsegpt, prune_wanda)
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 print('torch', version('torch'))
 print('transformers', version('transformers'))
 print('accelerate', version('accelerate'))
 print('# of gpus: ', torch.cuda.device_count())
 
-def get_llm(model_name, cache_dir="llm_weights"):
+
+def get_llm(model_name, cache_dir, device):
     model = AutoModelForCausalLM.from_pretrained(
-        model_name, 
-        torch_dtype=torch.float16, 
-        cache_dir=cache_dir, 
-        low_cpu_mem_usage=True, 
-        device_map="auto"
+        model_name,
+        torch_dtype=torch.float16,
+        cache_dir=cache_dir,
+        low_cpu_mem_usage=True,
+        device_map=device,
     )
 
-    model.seqlen = model.config.max_position_embeddings 
+    model.seqlen = 2048
     return model
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -32,10 +35,11 @@ def main():
     parser.add_argument('--nsamples', type=int, default=128, help='Number of calibration samples.')
     parser.add_argument('--sparsity_ratio', type=float, default=0, help='Sparsity level')
     parser.add_argument("--sparsity_type", type=str, choices=["unstructured", "4:8", "2:4"])
-    parser.add_argument("--prune_method", type=str, choices=["magnitude", "wanda", "sparsegpt", 
+    parser.add_argument("--prune_method", type=str, choices=["magnitude", "wanda", "sparsegpt",
                         "ablate_mag_seq", "ablate_wanda_seq", "ablate_mag_iter", "ablate_wanda_iter", "search"])
-    parser.add_argument("--cache_dir", default="llm_weights", type=str )
+    parser.add_argument("--cache_dir", default=os.path.expanduser("~/.cache/prune_llm"), type=str)
     parser.add_argument('--use_variant', action="store_true", help="whether to use the wanda variant described in the appendix")
+    parser.add_argument('--device', type=str, default="cuda", help='Default device to use.')
     parser.add_argument('--save', type=str, default=None, help='Path to save results.')
     parser.add_argument('--save_model', type=str, default=None, help='Path to save the pruned model.')
 
@@ -54,12 +58,12 @@ def main():
 
     model_name = args.model.split("/")[-1]
     print(f"loading llm model {args.model}")
-    model = get_llm(args.model, args.cache_dir)
+    model = get_llm(args.model, args.cache_dir, args.device)
     model.eval()
-    tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False)
+    tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True)
 
-    device = torch.device("cuda:0")
-    if "30b" in args.model or "65b" in args.model: # for 30b and 65b we use device_map to load onto multiple A6000 GPUs, thus the processing here.
+    device = torch.device(args.device)
+    if "30b" in args.model or "65b" in args.model:  # for 30b and 65b we use device_map to load onto multiple A6000 GPUs, thus the processing here.
         device = model.hf_device_map["lm_head"]
     print("use device ", device)
 
@@ -91,11 +95,11 @@ def main():
         print(f"{args.prune_method}\t{sparsity_ratio:.4f}\t{ppl_test:.4f}", file=f, flush=True)
 
     if args.eval_zero_shot:
-        accelerate=False
+        accelerate = False
         if "30b" in args.model or "65b" in args.model or "70b" in args.model:
-            accelerate=True
+            accelerate = True
 
-        task_list = ["boolq", "rte","hellaswag","winogrande", "arc_easy","arc_challenge", "openbookqa"]
+        task_list = ["boolq", "rte", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"]
         num_shot = 0
         results = eval_zero_shot(args.model, model, tokenizer, task_list, num_shot, accelerate)
         print("********************************")
@@ -105,6 +109,7 @@ def main():
     if args.save_model:
         model.save_pretrained(args.save_model)
         tokenizer.save_pretrained(args.save_model)
+
 
 if __name__ == '__main__':
     main()
