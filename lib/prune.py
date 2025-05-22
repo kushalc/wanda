@@ -157,7 +157,9 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
             handles.append(subset[name].register_forward_hook(add_batch(name)))
         for j in range(args.nsamples):
             with torch.no_grad():
-                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+                position_embeddings = model.model.rotary_emb(inps[j].unsqueeze(0), position_ids)
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids,
+                                position_embeddings=position_embeddings)[0]
         for h in handles:
             h.remove()
 
@@ -203,7 +205,9 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
 
         for j in range(args.nsamples):
             with torch.no_grad():
-                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+                position_embeddings = model.model.rotary_emb(inps[j].unsqueeze(0), position_ids)
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids,
+                                position_embeddings=position_embeddings)[0]
         inps, outs = outs, inps
 
     model.config.use_cache = use_cache 
