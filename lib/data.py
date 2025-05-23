@@ -1,5 +1,6 @@
 # Code adapted from https://github.com/IST-DASLab/sparsegpt/blob/master/datautils.py
 
+import logging
 import random
 
 import numpy as np
@@ -55,11 +56,14 @@ def get_c4(nsamples, seed, seqlen, tokenizer):
     random.seed(seed)
     trainloader = []
     for _ in range(nsamples):
-        for _ in range(100):
+        for _ in range(1000):
             i = random.randint(0, len(traindata) - 1)
             trainenc = tokenizer(traindata[i]['text'], return_tensors='pt')
             if trainenc.input_ids.shape[1] > seqlen:
                 break
+        if trainenc.input_ids.shape[1] <= seqlen:
+            logging.warning("Couldn't find appropriate seqlen: %d", trainenc.input_ids.shape[1])
+
         i = random.randint(0, max(trainenc.input_ids.shape[1] - seqlen - 1, 0))
         j = i + seqlen
         inp = trainenc.input_ids[:, i:j]

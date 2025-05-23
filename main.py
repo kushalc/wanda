@@ -24,6 +24,9 @@ def get_llm(model_name, cache_dir, device):
         device_map=device,
     )
 
+    # NOTE: Modern models have significantly longer context windows and C4 doesn't have enough
+    # examples that exceed these.
+    # model.seqlen = model.config.max_position_embeddings
     model.seqlen = 2048
     return model
 
