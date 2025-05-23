@@ -1,9 +1,10 @@
 import heapq
+import logging
 import time
 
 import torch
 import torch.nn as nn
-from tqdm import tqdm
+from tqdm.notebook import tqdm
 
 from .ablate import AblateGPT
 from .data import get_loaders
@@ -54,7 +55,7 @@ def check_sparsity(model):
             sub_count += (W == 0).sum().item()
             sub_params += W.numel()
 
-        print(f"layer {i} sparsity {float(sub_count)/sub_params:.6f}")
+        logging.info(f"layer {i} sparsity {float(sub_count)/sub_params:.6f}")
 
     model.config.use_cache = use_cache
     return float(count)/total_params
@@ -139,9 +140,9 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
     use_cache = model.config.use_cache
     model.config.use_cache = False
 
-    print("loading calibration data")
+    logging.info("loading calibration data")
     dataloader, _ = get_loaders("c4", nsamples=args.nsamples, seed=args.seed, seqlen=model.seqlen, tokenizer=tokenizer)
-    print("dataset loading complete")
+    logging.info("dataset loading complete")
     with torch.no_grad():
         inps, outs, attention_mask, position_ids = prepare_calibration_input(model, dataloader, device, seqlen=model.seqlen)
 
@@ -175,7 +176,7 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
             h.remove()
 
         for name in subset:
-            print(f"pruning layer {i} name {name}")
+            logging.info(f"pruning layer {i} name {name}")
             W_metric = torch.abs(subset[name].weight.data) * torch.sqrt(wrapped_layers[name].scaler_row.reshape((1, -1)))
 
             W_mask = (torch.zeros_like(W_metric) == 1)  # initialize a mask to be all False
@@ -206,7 +207,7 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
 
                         alpha = alpha_new
                         W_mask, cur_sparsity = return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before)
-                    print(f"alpha found {alpha} sparsity {cur_sparsity:.6f}")
+                    logging.info(f"alpha found {alpha} sparsity {cur_sparsity:.6f}")
                 else:
                     # unstructured pruning
                     indices = sort_res[1][:, :int(W_metric.shape[1]*args.sparsity_ratio)]
@@ -228,7 +229,7 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
 @torch.no_grad()
 def prune_sparsegpt(args, model, tokenizer, dev, prune_n=0, prune_m=0):
     # SparseGPT code available at: https://github.com/IST-DASLab/sparsegpt/tree/f5c25005a61f96a0933ca2f95705a963585aafaa
-    print('Starting ...')
+    logging.info('Starting ...')
     dataloader, _ = get_loaders("c4", nsamples=args.nsamples, seed=args.seed, seqlen=model.seqlen, tokenizer=tokenizer)
 
     use_cache = model.config.use_cache
@@ -268,13 +269,13 @@ def prune_sparsegpt(args, model, tokenizer, dev, prune_n=0, prune_m=0):
     attention_mask = cache['attention_mask']
     position_ids = cache['position_ids']
 
-    print('Ready.')
+    logging.info('Ready.')
 
     for i in range(len(layers)):
         layer = layers[i]
         if f"model.layers.{i}" in model.hf_device_map:
             dev = model.hf_device_map[f"model.layers.{i}"]
-            print(f"layer {i} device {dev}")
+            logging.info(f"layer {i} device {dev}")
             inps, outs, attention_mask, position_ids = inps.to(dev), outs.to(dev), attention_mask.to(dev), position_ids.to(dev)
 
         subset = find_layers(layer)
@@ -298,8 +299,8 @@ def prune_sparsegpt(args, model, tokenizer, dev, prune_n=0, prune_m=0):
             h.remove()
 
         for name in gpts:
-            print(i, name)
-            print('Pruning ...')
+            logging.info(i, name)
+            logging.info('Pruning ...')
 
             gpts[name].fasterprune(args.sparsity_ratio, prune_n=prune_n, prune_m=prune_m, percdamp=0.01, blocksize=128)
             gpts[name].free()
@@ -319,7 +320,7 @@ def prune_sparsegpt(args, model, tokenizer, dev, prune_n=0, prune_m=0):
 @torch.no_grad()
 def prune_ablate(args, model, tokenizer, dev, prune_n=0, prune_m=0):
     # SparseGPT code available at: https://github.com/IST-DASLab/sparsegpt/tree/f5c25005a61f96a0933ca2f95705a963585aafaa
-    print('Starting ...')
+    logging.info('Starting ...')
     dataloader, _ = get_loaders("c4", nsamples=args.nsamples, seed=args.seed, seqlen=model.seqlen, tokenizer=tokenizer)
 
     use_cache = model.config.use_cache
@@ -359,13 +360,13 @@ def prune_ablate(args, model, tokenizer, dev, prune_n=0, prune_m=0):
     attention_mask = cache['attention_mask']
     position_ids = cache['position_ids']
 
-    print('Ready.')
+    logging.info('Ready.')
 
     for i in range(len(layers)):
         layer = layers[i]
         if f"model.layers.{i}" in model.hf_device_map:
             dev = model.hf_device_map[f"model.layers.{i}"]
-            print(f"layer {i} device {dev}")
+            logging.info(f"layer {i} device {dev}")
             inps, outs, attention_mask, position_ids = inps.to(dev), outs.to(dev), attention_mask.to(dev), position_ids.to(dev)
 
         subset = find_layers(layer)
@@ -389,8 +390,8 @@ def prune_ablate(args, model, tokenizer, dev, prune_n=0, prune_m=0):
             h.remove()
 
         for name in gpts:
-            print(i, name)
-            print('Pruning ...')
+            logging.info(i, name)
+            logging.info('Pruning ...')
 
             if args.prune_method == "ablate_wanda_seq":
                 prune_mask = gpts[name].get_wanda_mask(args.sparsity_ratio, prune_n, prune_m)

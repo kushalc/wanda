@@ -1,4 +1,5 @@
 import argparse
+import logging
 import os
 from importlib.metadata import version
 
@@ -9,10 +10,17 @@ from lib.prune import (check_sparsity, find_layers, prune_ablate,
                        prune_magnitude, prune_sparsegpt, prune_wanda)
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-print('torch', version('torch'))
-print('transformers', version('transformers'))
-print('accelerate', version('accelerate'))
-print('# of gpus: ', torch.cuda.device_count())
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(funcName)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    force=True,
+)
+
+logging.info('torch: %s', version('torch'))
+logging.info('transformers: %s', version('transformers'))
+logging.info('accelerate: %s', version('accelerate'))
+logging.info('# of gpus: %s', torch.cuda.device_count())
 
 
 def get_llm(model_name, cache_dir, device):
@@ -60,7 +68,7 @@ def main():
         prune_n, prune_m = map(int, args.sparsity_type.split(":"))
 
     model_name = args.model.split("/")[-1]
-    print(f"loading llm model {args.model}")
+    logging.info(f"loading llm model {args.model}")
     model = get_llm(args.model, args.cache_dir, args.device)
     model.eval()
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True)
@@ -68,10 +76,10 @@ def main():
     device = torch.device(args.device)
     if "30b" in args.model or "65b" in args.model:  # for 30b and 65b we use device_map to load onto multiple A6000 GPUs, thus the processing here.
         device = model.hf_device_map["lm_head"]
-    print("use device ", device)
+    logging.info("use device %s", device)
 
     if args.sparsity_ratio != 0:
-        print("pruning starts")
+        logging.info("pruning starts")
         if args.prune_method == "wanda":
             prune_wanda(args, model, tokenizer, device, prune_n=prune_n, prune_m=prune_m)
         elif args.prune_method == "magnitude":
@@ -82,13 +90,13 @@ def main():
             prune_ablate(args, model, tokenizer, device, prune_n=prune_n, prune_m=prune_m)
 
     ################################################################
-    print("*"*30)
+    logging.info("*"*30)
     sparsity_ratio = check_sparsity(model)
-    print(f"sparsity sanity check {sparsity_ratio:.4f}")
-    print("*"*30)
+    logging.info(f"sparsity sanity check {sparsity_ratio:.4f}")
+    logging.info("*"*30)
     ################################################################
     ppl_test = eval_ppl(args, model, tokenizer, device)
-    print(f"wikitext perplexity {ppl_test}")
+    logging.info(f"wikitext perplexity {ppl_test}")
 
     if not os.path.exists(args.save):
         os.makedirs(args.save)
@@ -105,9 +113,9 @@ def main():
         task_list = ["boolq", "rte", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"]
         num_shot = 0
         results = eval_zero_shot(args.model, model, tokenizer, task_list, num_shot, accelerate)
-        print("********************************")
-        print("zero_shot evaluation results")
-        print(results)
+        logging.info("********************************")
+        logging.info("zero_shot evaluation results")
+        logging.info(results)
 
     if args.save_model:
         model.save_pretrained(args.save_model)
