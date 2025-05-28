@@ -143,8 +143,6 @@ tqdm==4.67.1
 # sparse-correction/wanda/main.py: 11
 # sparse-correction/wanda/main_opt.py: 5
 transformers==4.52.3
-# sparse-correction/analysis/qa.py: 7
-tree-of-thoughts-llm==0.1.0
 # sparse-correction/wanda/dense_ft/trainer.py: 2078
 # sparse-correction/wanda/image_classifiers/utils.py: 197
 wandb==0.19.10
@@ -152,6 +150,7 @@ wandb==0.19.10
 # WARNING(pigar): some manual fixes might be required as pigar has detected duplicate requirements for the same import name (possibly for different submodules).
 # manual
 bleurt @ git+https://github.com/google-research/bleurt.git
+# tree-of-thoughts-llm==0.1.0
 # transformer-lens==2.15.0
 # uqlm
 # lib
