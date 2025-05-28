@@ -413,3 +413,92 @@ def prune_ablate(args, model, tokenizer, dev, prune_n=0, prune_m=0):
 
     model.config.use_cache = use_cache
     torch.cuda.empty_cache()
+
+
+###############################
+# Concept-based pruning utils #
+###############################
+
+def load_sae(identifier, device):
+    """Load a pretrained SAE from SAE-Lens."""
+    try:
+        from sae_lens.training.load_pretrained import load_pretrained_sae
+    except Exception as exc:  # pragma: no cover - dependency issues
+        logging.warning("Failed to import sae_lens: %s", exc)
+        return None
+
+    sae = load_pretrained_sae(identifier, device=device)
+    return sae
+
+
+def get_concept_handles(model, layer_idx):
+    """Return module corresponding to the given layer index."""
+    layers = model.model.layers
+    return layers[layer_idx]
+
+
+@torch.no_grad()
+def prune_concept_noise(args, model, tokenizer, device):
+    """Inject noise into K random concepts."""
+    sae = load_sae(args.sae_model, device)
+    if sae is None:
+        logging.warning("SAE could not be loaded; skipping concept_noise")
+        return
+
+    layer_idx = getattr(sae, "layer", 0)
+    layer = get_concept_handles(model, layer_idx)
+    k = args.concept_noise_k
+
+    decoder = sae.decoder.weight  # [n_concepts, d]
+    encoder = sae.encoder.weight
+    num_concepts = decoder.shape[0]
+    selected = torch.randperm(num_concepts)[:k].to(device)
+
+    def hook(_, inp, out):
+        act = out[0]
+        orig_shape = act.shape
+        act_flat = act.reshape(-1, act.shape[-1])
+        concepts = act_flat @ encoder.T
+        concepts[:, selected] += torch.randn_like(concepts[:, selected])
+        act_flat = concepts @ decoder
+        return (act_flat.reshape(orig_shape),)
+
+    handle = layer.register_forward_hook(hook)
+
+    dataloader, _ = get_loaders(
+        args.activation_dataset,
+        nsamples=args.nsamples,
+        seed=args.seed,
+        seqlen=model.seqlen,
+        tokenizer=tokenizer,
+    )
+    for batch in dataloader:
+        model(batch[0].to(device))
+
+    handle.remove()
+
+
+@torch.no_grad()
+def prune_concept_prune(args, model, tokenizer, device):
+    """Prune neurons associated with L random concepts."""
+    sae = load_sae(args.sae_model, device)
+    if sae is None:
+        logging.warning("SAE could not be loaded; skipping concept_prune")
+        return
+
+    layer_idx = getattr(sae, "layer", 0)
+    layer = get_concept_handles(model, layer_idx)
+
+    decoder = sae.decoder.weight  # [n_concepts, d]
+    num_concepts = decoder.shape[0]
+    l = args.concept_prune_l
+    selected = torch.randperm(num_concepts)[:l]
+
+    # Map concept to neuron by highest absolute decoder weight
+    neuron_indices = torch.argmax(decoder.abs(), dim=1)
+    prune_neurons = neuron_indices[selected]
+
+    weight = layer.weight.data
+    weight[:, prune_neurons] = 0
+
+
