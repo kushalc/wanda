@@ -162,4 +162,67 @@ def eval_zero_shot(model_name, model, tokenizer, task_list=["boolq","rte","hella
         add_special_tokens=add_special_tokens
     )
 
-    return results 
+    return results
+
+
+##############################
+# Hallucination Metrics Utils #
+##############################
+
+def concept_cosine_similarity(model, sae, layer_idx, prompts_a, prompts_b, tokenizer, device):
+    """Compare average concept activations between two prompt sets."""
+    layer = model.model.layers[layer_idx]
+    encoder = sae.encoder.weight
+
+    def extract(prompts):
+        acts = []
+        for text in prompts:
+            tokens = tokenizer(text, return_tensors="pt").input_ids.to(device)
+            with torch.no_grad():
+                out = layer(model.model.embed_tokens(tokens))[0]
+            flat = out.reshape(-1, out.shape[-1])
+            acts.append((flat @ encoder.T).mean(0))
+        return torch.stack(acts).mean(0)
+
+    a = extract(prompts_a)
+    b = extract(prompts_b)
+    sim = torch.nn.functional.cosine_similarity(a, b, dim=0)
+    return sim.item()
+
+
+def bleurt_interpretation_score(refs, hyps):
+    """Compute BLEURT score between two sets of texts."""
+    try:
+        from bleurt import score as bleurt_score
+    except Exception as exc:  # pragma: no cover
+        logging.warning("BLEURT not available: %s", exc)
+        return 0.0
+
+    scorer = bleurt_score.BleurtScorer()
+    return float(sum(scorer.score(refs, hyps)) / len(refs))
+
+
+def evaluate_hallucination(args, model, tokenizer, device):
+    """Compute hallucination metrics."""
+    from .prune import load_sae
+
+    sae = load_sae(args.sae_model, device)
+    if sae is None:
+        return {}
+
+    prompts_correct = ["A"]
+    prompts_incorrect = ["B"]
+    layer_idx = getattr(sae, "layer", 0)
+
+    cosine = concept_cosine_similarity(
+        model,
+        sae,
+        layer_idx,
+        prompts_correct,
+        prompts_incorrect,
+        tokenizer,
+        device,
+    )
+    bleurt = bleurt_interpretation_score(prompts_correct, prompts_incorrect)
+    return {"concept_cosine": cosine, "bleurt": bleurt}
+

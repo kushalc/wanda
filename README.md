@@ -104,6 +104,24 @@ done
 ```
 Here `ablate_{mag/wanda}_{seq/iter}` means that we use magnitude pruning or wanda to obtain the pruned mask at each layer, then apply weight update procedure with either a sequential style or an iterative style every 128 input channels. For details, please see Section 5 of our [paper](https://arxiv.org/abs/2306.11695).
 
+### Concept-Based Pruning
+We provide two experimental pruning strategies that operate on monosemantic concept activations via [SAE-Lens](https://github.com/redwoodresearch/sae_lens). Use `--sae_model` to load a pretrained SAE and select either:
+
+- `concept_noise`: inject Gaussian noise into `K` random concepts (`--concept_noise_k`).
+- `concept_prune`: remove neurons associated with `L` random concepts (`--concept_prune_l`).
+
+Example quick run:
+
+```sh
+python main.py \
+    --model gemma-2-2b \
+    --prune_method concept_noise \
+    --sae_model gemma-2-2b/20-gemmascope-res-16k \
+    --concept_noise_k 5
+```
+
+For broader testing use `--model meta-llama/Llama-3.1-8B` and `--sae_model 25-llamascope-res-32k`. A sweep over different values of `K` and `L` is provided in [`scripts/concept_pruning_sweep.sh`](scripts/concept_pruning_sweep.sh).
+
 ### Zero-Shot Evaluation
 For evaluating zero-shot tasks, we modify the [EleutherAI LM Harness](https://github.com/EleutherAI/lm-evaluation-harness/tree/master) framework so that it could evaluate pruned LLM models. We provide the modified repo in [this link](https://drive.google.com/file/d/1zugbLyGZKsH1L19L9biHLfaGGFnEc7XL/view?usp=sharing). Make sure to download, extract and install this custom `lm_eval` package from the source code.
 

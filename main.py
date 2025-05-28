@@ -6,8 +6,16 @@ from importlib.metadata import version
 import numpy as np
 import torch
 from lib.eval import eval_ppl, eval_zero_shot
-from lib.prune import (check_sparsity, find_layers, prune_ablate,
-                       prune_magnitude, prune_sparsegpt, prune_wanda)
+from lib.prune import (
+    check_sparsity,
+    find_layers,
+    prune_ablate,
+    prune_magnitude,
+    prune_sparsegpt,
+    prune_wanda,
+    prune_concept_noise,
+    prune_concept_prune,
+)
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 logging.basicConfig(
@@ -46,14 +54,33 @@ def main():
     parser.add_argument('--nsamples', type=int, default=128, help='Number of calibration samples.')
     parser.add_argument('--sparsity_ratio', type=float, default=0, help='Sparsity level')
     parser.add_argument("--sparsity_type", type=str, choices=["unstructured", "4:8", "2:4"])
-    parser.add_argument("--prune_method", type=str, choices=["magnitude", "wanda", "sparsegpt",
-                        "ablate_mag_seq", "ablate_wanda_seq", "ablate_mag_iter", "ablate_wanda_iter", "search"])
+    parser.add_argument(
+        "--prune_method",
+        type=str,
+        choices=[
+            "magnitude",
+            "wanda",
+            "sparsegpt",
+            "ablate_mag_seq",
+            "ablate_wanda_seq",
+            "ablate_mag_iter",
+            "ablate_wanda_iter",
+            "concept_noise",
+            "concept_prune",
+            "search",
+        ],
+    )
     parser.add_argument("--cache_dir", default=os.path.expanduser("~/.cache/prune_llm"), type=str)
     parser.add_argument('--use_variant', action="store_true", help="whether to use the wanda variant described in the appendix")
     parser.add_argument('--device', type=str, default="cuda", help='Default device to use.')
     parser.add_argument('--save', type=str, default=None, help='Path to save results.')
     parser.add_argument('--save_model', type=str, default=None, help='Path to save the pruned model.')
 
+    parser.add_argument("--sae_model", type=str, default=None, help="Pretrained SAE identifier")
+    parser.add_argument("--concept_noise_k", type=int, default=0, help="Number of concepts to apply noise")
+    parser.add_argument("--concept_prune_l", type=int, default=0, help="Number of concepts to prune")
+    parser.add_argument("--activation_dataset", type=str, default="c4", help="Dataset for concept activations")
+    parser.add_argument("--eval_hallucination_metrics", action="store_true", help="Compute hallucination metrics")
     parser.add_argument("--eval_zero_shot", action="store_true")
     args = parser.parse_args()
 
@@ -88,6 +115,10 @@ def main():
             prune_sparsegpt(args, model, tokenizer, device, prune_n=prune_n, prune_m=prune_m)
         elif "ablate" in args.prune_method:
             prune_ablate(args, model, tokenizer, device, prune_n=prune_n, prune_m=prune_m)
+        elif args.prune_method == "concept_noise":
+            prune_concept_noise(args, model, tokenizer, device)
+        elif args.prune_method == "concept_prune":
+            prune_concept_prune(args, model, tokenizer, device)
 
     ################################################################
     logging.info("*"*30)
@@ -104,6 +135,11 @@ def main():
     with open(save_filepath, "w") as f:
         print("method\tactual_sparsity\tppl_test", file=f, flush=True)
         print(f"{args.prune_method}\t{sparsity_ratio:.4f}\t{ppl_test:.4f}", file=f, flush=True)
+
+    if args.eval_hallucination_metrics:
+        from lib.eval import evaluate_hallucination
+        metrics = evaluate_hallucination(args, model, tokenizer, device)
+        logging.info("hallucination metrics %s", metrics)
 
     if args.eval_zero_shot:
         accelerate = False
