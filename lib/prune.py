@@ -2,9 +2,11 @@ import heapq
 import logging
 import time
 
+import pandas as pd
 import torch
 import torch.nn as nn
 from tqdm.notebook import tqdm
+from transformer_lens import HookedTransformer
 
 from .ablate import AblateGPT
 from .data import get_loaders
@@ -34,7 +36,33 @@ def find_layers(module, layers=[nn.Linear], name=''):
     return res
 
 
-def check_sparsity(model):
+def _check_sparsity__hookedtransformer(model):
+    zeros_df = pd.DataFrame(columns=['W_Q', 'W_K', 'W_V', 'W_O', 'W_in', 'W_out', 'W_gate'])
+    numel_df = pd.DataFrame(columns=zeros_df.columns)
+    for block in model.blocks:
+        for name in zeros_df.columns:
+            w = getattr(block.attn, name, None) if hasattr(block.attn, name) \
+                else getattr(block.mlp, name, None)
+            if w is None:
+                logging.warning("Couldn't find block=%s name=%s", block, name)
+                continue
+
+            w = w.detach() if hasattr(w, "detach") else w
+            zeros_df.loc[block.name, name] = (w == 0).sum().item()
+            numel_df.loc[block.name, name] = w.numel()
+
+    block_sparsity_df = zeros_df.sum(axis=1) / numel_df.sum(axis=1)
+    type_sparsity_df = zeros_df.sum(axis=0) / numel_df.sum(axis=0)
+
+    count = zeros_df.sum().sum()
+    total = numel_df.sum().sum()
+    total_sparsity = count / total if total > 0 else 0.0
+    logging.info("Calculating %.6f total sparsity, block-level sparsity=\n%s",
+                 total_sparsity, block_sparsity_df.to_string())
+    return total_sparsity
+
+
+def _check_sparsity__standard(model):
     use_cache = model.config.use_cache
     model.config.use_cache = False
 
@@ -59,6 +87,17 @@ def check_sparsity(model):
 
     model.config.use_cache = use_cache
     return float(count)/total_params
+
+
+def check_sparsity(model):
+    """
+    Compute sparsity of model weights. Supports both standard models and TransformerLens HookedSAETransformer.
+    For HookedSAETransformer, uses a performance-optimal approach.
+    """
+    if isinstance(model, HookedTransformer):
+        return _check_sparsity__hookedtransformer(model)
+    else:
+        return _check_sparsity__standard(model)
 
 
 def prepare_calibration_input(model, dataloader, device, seqlen=None):
@@ -500,5 +539,3 @@ def prune_concept_prune(args, model, tokenizer, device):
 
     weight = layer.weight.data
     weight[:, prune_neurons] = 0
-
-
