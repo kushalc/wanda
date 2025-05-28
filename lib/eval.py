@@ -1,13 +1,20 @@
 # Import necessary modules
+import fnmatch
+import logging
 import time
+from collections import defaultdict
+
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
+import torch.nn.functional as nnf
+from tqdm import tqdm
+
+from utilities.etl import load_truthfulqa
 
 # Import get_loaders function from data module within the same directory
-from .data import get_loaders 
-
-from collections import defaultdict
-import fnmatch
+from .data import get_loaders
 
 
 # Function to evaluate perplexity (ppl) on a specified model and tokenizer
@@ -16,19 +23,21 @@ def eval_ppl(args, model, tokenizer, device=torch.device("cuda:0")):
     dataset = "wikitext2"
 
     # Print status
-    print(f"evaluating on {dataset}")
+    logging.info(f"evaluating on {dataset}")
 
     # Get the test loader
     _, testloader = get_loaders(
-        dataset, seed=0, seqlen=model.seqlen, tokenizer=tokenizer 
+        dataset, seed=0, seqlen=model.seqlen, tokenizer=tokenizer
     )
 
     # Evaluate ppl in no grad context to avoid updating the model
     with torch.no_grad():
         ppl_test = eval_ppl_wikitext(model, testloader, 1, device)
-    return ppl_test 
+    return ppl_test
 
 # Function to evaluate perplexity (ppl) specifically on the wikitext dataset
+
+
 def eval_ppl_wikitext_train(model, trainloader, bs=1, device=None):
     # Get input IDs
     # testenc = testenc.input_ids
@@ -39,13 +48,10 @@ def eval_ppl_wikitext_train(model, trainloader, bs=1, device=None):
 
     # List to store negative log likelihoods
     nlls = []
-    print(f"nsamples {nsamples}")
+    logging.info(f"nsamples {nsamples}")
 
     # Loop through each batch
-    for i in range(0,nsamples,bs):
-        if i % 50 == 0:
-            print(f"sample {i}")
-
+    for i in tqdm(range(0, nsamples, bs)):
         # Calculate end index
         j = min(i+bs, nsamples)
 
@@ -55,7 +61,8 @@ def eval_ppl_wikitext_train(model, trainloader, bs=1, device=None):
         inputs = inputs.reshape(j-i, model.seqlen)
 
         # Forward pass through the model
-        lm_logits = model(inputs).logits
+        output = model(inputs)
+        lm_logits = output.logits if hasattr(output, 'logits') else output
 
         # Shift logits and labels for next token prediction
         shift_logits = lm_logits[:, :-1, :].contiguous()
@@ -80,6 +87,8 @@ def eval_ppl_wikitext_train(model, trainloader, bs=1, device=None):
     return ppl.item()
 
 # Function to evaluate perplexity (ppl) specifically on the wikitext dataset
+
+
 def eval_ppl_wikitext(model, testenc, bs=1, device=None):
     # Get input IDs
     testenc = testenc.input_ids
@@ -89,22 +98,20 @@ def eval_ppl_wikitext(model, testenc, bs=1, device=None):
 
     # List to store negative log likelihoods
     nlls = []
-    print(f"nsamples {nsamples}")
+    logging.info(f"nsamples {nsamples}")
 
     # Loop through each batch
-    for i in range(0,nsamples,bs):
-        if i % 50 == 0:
-            print(f"sample {i}")
-
+    for i in tqdm(range(0, nsamples, bs)):
         # Calculate end index
         j = min(i+bs, nsamples)
 
         # Prepare inputs and move to device
-        inputs = testenc[:,(i * model.seqlen):(j * model.seqlen)].to(device)
+        inputs = testenc[:, (i * model.seqlen):(j * model.seqlen)].to(device)
         inputs = inputs.reshape(j-i, model.seqlen)
 
         # Forward pass through the model
-        lm_logits = model(inputs).logits
+        output = model(inputs)
+        lm_logits = output.logits if hasattr(output, 'logits') else output
 
         # Shift logits and labels for next token prediction
         shift_logits = lm_logits[:, :-1, :].contiguous()
@@ -129,9 +136,10 @@ def eval_ppl_wikitext(model, testenc, bs=1, device=None):
     return ppl.item()
 
 
-def eval_zero_shot(model_name, model, tokenizer, task_list=["boolq","rte","hellaswag","winogrande","arc_challenge","arc_easy","openbookqa"], 
-        num_fewshot=0, use_accelerate=False, add_special_tokens=False):
-    from lm_eval import tasks, evaluator 
+def eval_zero_shot(model_name, model, tokenizer, task_list=["boolq", "rte", "hellaswag", "winogrande", "arc_challenge", "arc_easy", "openbookqa"],
+                   num_fewshot=0, use_accelerate=False, add_special_tokens=False):
+    from lm_eval import evaluator, tasks
+
     def pattern_match(patterns, source_list):
         task_names = set()
         for pattern in patterns:
@@ -140,7 +148,7 @@ def eval_zero_shot(model_name, model, tokenizer, task_list=["boolq","rte","hella
         return list(task_names)
     task_names = pattern_match(task_list, tasks.ALL_TASKS)
     model_args = f"pretrained={model_name},cache_dir=./llm_weights"
-    limit = None 
+    limit = None
     if "70b" in model_name or "65b" in model_name:
         limit = 2000
     if use_accelerate:
@@ -158,71 +166,106 @@ def eval_zero_shot(model_name, model, tokenizer, task_list=["boolq","rte","hella
         decontamination_ngrams_path=None,
         check_integrity=False,
         pretrained_model=model,
-        tokenizer=tokenizer, 
+        tokenizer=tokenizer,
         add_special_tokens=add_special_tokens
     )
 
     return results
 
 
-##############################
-# Hallucination Metrics Utils #
-##############################
+def evaluate_hallucination(model, sae, tokenizer, device, activation_threshold=1.0, batch_size=32):
+    """
+    Evaluate hallucination on TruthfulQA using SAE concepts and logprobs, batching to save memory.
+    Args:
+        model: HookedSAETransformer
+        sae: SAE module (with .encode())
+        tokenizer: tokenizer
+        device: torch.device
+        activation_threshold: threshold for concept activation (default: 0.0)
+        batch_size: number of prompts per batch
+    Returns:
+        dict with accuracy and concept activation stats
+    """
+    truthful_df = load_truthfulqa(mc=True, preset="null")
+    sampled_idx = np.random.choice(truthful_df["core_prompt_idx"].unique(), size=10, replace=False)
+    truthful_df = truthful_df[truthful_df["core_prompt_idx"].isin(sampled_idx)]
 
-def concept_cosine_similarity(model, sae, layer_idx, prompts_a, prompts_b, tokenizer, device):
-    """Compare average concept activations between two prompt sets."""
-    layer = model.model.layers[layer_idx]
-    encoder = sae.encoder.weight
+    # Prepare all prompt texts and answer types
+    prompts = truthful_df["_prompt_text"].tolist()
+    answer_types = truthful_df["AnswerType"].tolist()
 
-    def extract(prompts):
-        acts = []
-        for text in prompts:
-            tokens = tokenizer(text, return_tensors="pt").input_ids.to(device)
-            with torch.no_grad():
-                out = layer(model.model.embed_tokens(tokens))[0]
-            flat = out.reshape(-1, out.shape[-1])
-            acts.append((flat @ encoder.T).mean(0))
-        return torch.stack(acts).mean(0)
+    all_logits = []
+    all_concepts = []
+    # Batch processing
+    for start in tqdm(range(0, len(prompts), batch_size)):
+        end = min(start + batch_size, len(prompts))
+        batch_prompts = prompts[start:end]
+        with torch.no_grad():
+            tokens = tokenizer(batch_prompts, return_tensors="pt", padding="longest",
+                               truncation=True, max_length=model.seqlen).to(device)
+            hook_name = sae.cfg.hook_name + ".hook_sae_acts_post"
+            logits, cache = model.run_with_cache(tokens.input_ids, return_type="logits",
+                                                 return_cache_object=True, names_filter=[hook_name])
+            all_concepts.append(cache[hook_name].cpu())
+            all_logits.append(logits.cpu())
 
-    a = extract(prompts_a)
-    b = extract(prompts_b)
-    sim = torch.nn.functional.cosine_similarity(a, b, dim=0)
-    return sim.item()
+    # Concatenate all batches, find max sequence length across all batches
+    max_seq_len = max(x.shape[1] for x in all_logits)
 
+    def pad_to_max_seq(x):
+        return nnf.pad(x, (0, 0, 0, max_seq_len - x.shape[1])) if max_seq_len > x.shape[1] else x
+    logits = torch.cat([pad_to_max_seq(x) for x in all_logits], dim=0)
+    sae_acts = torch.cat([pad_to_max_seq(x) for x in all_concepts], dim=0)
 
-def bleurt_interpretation_score(refs, hyps):
-    """Compute BLEURT score between two sets of texts."""
-    try:
-        from bleurt import score as bleurt_score
-    except Exception as exc:  # pragma: no cover
-        logging.warning("BLEURT not available: %s", exc)
-        return 0.0
+    # Compute logprob and concept_acts for each row in truthful_df
+    truthful_df = truthful_df.assign(logprob=pd.NA, concepts=None)
+    for i, (idx, row) in enumerate(truthful_df.iterrows()):
+        prompt_len = len(tokenizer(row["_base_text"], return_tensors="pt").input_ids[0])
+        answer_tokens = tokenizer(row["_prompt_text"], return_tensors="pt").input_ids[0][prompt_len:]
+        answer_range = range(prompt_len, prompt_len+len(answer_tokens))
 
-    scorer = bleurt_score.BleurtScorer()
-    return float(sum(scorer.score(refs, hyps)) / len(refs))
+        truthful_df.at[idx, "logprob"] = nnf.log_softmax(logits[i, answer_range], dim=-1)[range(len(answer_tokens)), answer_tokens].sum().item()
 
+        activations = np.where((sae_acts[i, answer_range, :].cpu().numpy() > activation_threshold).any(axis=0))[0]
+        truthful_df.at[idx, "concepts"] = activations.tolist()
 
-def evaluate_hallucination(args, model, tokenizer, device):
-    """Compute hallucination metrics."""
-    from .prune import load_sae
+    # Group by core_prompt_idx, get all answers for each question
+    # Compute is_group_correct for each group
+    def group_correct(group):
+        if not (group["AnswerType"] == "Correct").any() or not (group["AnswerType"] == "Incorrect").any():
+            return False
+        max_correct = group.loc[group["AnswerType"] == "Correct", "logprob"].max()
+        max_incorrect = group.loc[group["AnswerType"] == "Incorrect", "logprob"].max()
+        return max_correct > max_incorrect
+    truthful_df["correct"] = truthful_df.groupby("core_prompt_idx") \
+                                        .apply(group_correct) \
+                                        .reindex(truthful_df["core_prompt_idx"]) \
+                                        .values
 
-    sae = load_sae(args.sae_model, device)
-    if sae is None:
-        return {}
+    # Vectorized concept activation analysis
+    correct_mask = truthful_df["correct"] == True
+    incorrect_mask = truthful_df["correct"] == False
 
-    prompts_correct = ["A"]
-    prompts_incorrect = ["B"]
-    layer_idx = getattr(sae, "layer", 0)
+    def _aggregate_concepts(mask):
+        return truthful_df.loc[mask] \
+                          .explode("concepts") \
+                          .groupby("concepts") \
+                          .agg({"logprob": "mean", "core_prompt_idx": "nunique", "Answer": "count"}) \
+                          .rename(columns={"core_prompt_idx": "nunique", "Answer": "count"}) \
+                          .sort_values("nunique", ascending=False)
+    concepts_df = pd.concat([_aggregate_concepts(correct_mask), _aggregate_concepts(incorrect_mask)], keys=["Correct", "Incorrect"], axis=1)
+    concepts_df["score"] = (concepts_df[("Correct", "nunique")].fillna(0) + 1) / \
+                           (concepts_df.xs("nunique", axis=1, level=1).fillna(0).sum(axis=1) + 2)  # pseudocounts
+    concepts_df = concepts_df.sort_values("score", ascending=False)
 
-    cosine = concept_cosine_similarity(
-        model,
-        sae,
-        layer_idx,
-        prompts_correct,
-        prompts_incorrect,
-        tokenizer,
-        device,
-    )
-    bleurt = bleurt_interpretation_score(prompts_correct, prompts_incorrect)
-    return {"concept_cosine": cosine, "bleurt": bleurt}
+    accuracy = correct_mask.groupby(truthful_df["core_prompt_idx"]).first().mean()
+    printable_cols = ["core_prompt_idx", "Question", "Answer", "AnswerType", "concepts", "logprob", "correct"]
+    logging.info("Calculated TruthfulQA accuracy=%.3f (sample=%d):\n%s", accuracy, truthful_df["core_prompt_idx"].nunique(),
+                 truthful_df.to_string(max_colwidth=50, line_width=250, columns=printable_cols))
 
+    return {
+        "accuracy": accuracy,
+        "total": truthful_df["core_prompt_idx"].nunique(),
+        "truthful_df": truthful_df[printable_cols],
+        "concepts_df": concepts_df,
+    }

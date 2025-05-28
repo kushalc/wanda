@@ -6,7 +6,7 @@ from importlib.metadata import version
 
 import numpy as np
 import torch
-from lib.eval import eval_ppl, eval_zero_shot
+from lib.eval import eval_ppl, eval_zero_shot, evaluate_hallucination
 from lib.prune import (check_sparsity, find_layers, prune_ablate,
                        prune_concept_noise, prune_concept_prune,
                        prune_magnitude, prune_sparsegpt, prune_wanda)
@@ -35,6 +35,7 @@ def get_llm(model_name, cache_dir, device, sae_name=None):
         "low_cpu_mem_usage": True,
         # "device_map": device,  # NOTE: HookedSAETransformer gets confused and loads into both mps and cpu
     }
+    meta = {}
     if sae_name is not None:
         model = HookedSAETransformer.from_pretrained_no_processing(model_name, **kwargs).to(device)
 
@@ -43,6 +44,7 @@ def get_llm(model_name, cache_dir, device, sae_name=None):
         sae, _, _ = SAE.from_pretrained(release=release, sae_id=sae_id, device=device)
         model.add_sae(sae)
         tokenizer = model.tokenizer
+        meta["sae"] = sae
 
         logging.info("Attached SAEs: %s", pprint.pformat(model.acts_to_saes, compact=True))
     else:
@@ -53,7 +55,7 @@ def get_llm(model_name, cache_dir, device, sae_name=None):
     # examples that exceed these.
     # model.seqlen = model.config.max_position_embeddings
     model.seqlen = 2048
-    return model, tokenizer
+    return model, tokenizer, meta
 
 
 def main():
@@ -106,7 +108,7 @@ def main():
 
     model_name = args.model.split("/")[-1]
     logging.info(f"loading llm model {args.model}")
-    model, tokenizer = get_llm(args.model, args.cache_dir, args.device, sae_name=args.sae)
+    model, tokenizer, meta = get_llm(args.model, args.cache_dir, args.device, sae_name=args.sae)
     model.eval()
 
     device = torch.device(args.device)
@@ -146,9 +148,8 @@ def main():
         print(f"{args.prune_method}\t{sparsity_ratio:.4f}\t{ppl_test:.4f}", file=f, flush=True)
 
     if args.eval_hallucination_metrics:
-        from lib.eval import evaluate_hallucination
-        metrics = evaluate_hallucination(args, model, tokenizer, device)
-        logging.info("hallucination metrics %s", metrics)
+        metrics = evaluate_hallucination(model, meta.get("sae"), tokenizer, device)
+        logging.info("hallucination metrics %s", metrics["accuracy"])
 
     if args.eval_zero_shot:
         accelerate = False
