@@ -1,22 +1,19 @@
 import argparse
 import logging
 import os
+import pprint
 from importlib.metadata import version
 
 import numpy as np
 import torch
 from lib.eval import eval_ppl, eval_zero_shot
-from lib.prune import (
-    check_sparsity,
-    find_layers,
-    prune_ablate,
-    prune_magnitude,
-    prune_sparsegpt,
-    prune_wanda,
-    prune_concept_noise,
-    prune_concept_prune,
-)
+from lib.prune import (check_sparsity, find_layers, prune_ablate,
+                       prune_concept_noise, prune_concept_prune,
+                       prune_magnitude, prune_sparsegpt, prune_wanda)
+from sae_lens import SAE, HookedSAETransformer
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from utilities.etl import load_pretrained_saes
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,29 +28,43 @@ logging.info('accelerate: %s', version('accelerate'))
 logging.info('# of gpus: %s', torch.cuda.device_count())
 
 
-def get_llm(model_name, cache_dir, device):
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype=torch.float16,
-        cache_dir=cache_dir,
-        low_cpu_mem_usage=True,
-        device_map=device,
-    )
+def get_llm(model_name, cache_dir, device, sae_name=None):
+    kwargs = {
+        "torch_dtype": torch.float16,
+        "cache_dir": cache_dir,
+        "low_cpu_mem_usage": True,
+        # "device_map": device,  # NOTE: HookedSAETransformer gets confused and loads into both mps and cpu
+    }
+    if sae_name is not None:
+        model = HookedSAETransformer.from_pretrained_no_processing(model_name, **kwargs).to(device)
+
+        pretrained_df = load_pretrained_saes()
+        release, sae_id = pretrained_df.loc[(model_name, sae_name), ["hf_release", "hf_sae_id"]]
+        sae, _, _ = SAE.from_pretrained(release=release, sae_id=sae_id, device=device)
+        model.add_sae(sae)
+        tokenizer = model.tokenizer
+
+        logging.info("Attached SAEs: %s", pprint.pformat(model.acts_to_saes, compact=True))
+    else:
+        model = AutoModelForCausalLM.from_pretrained(model_name, device_map=device, **kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True)
 
     # NOTE: Modern models have significantly longer context windows and C4 doesn't have enough
     # examples that exceed these.
     # model.seqlen = model.config.max_position_embeddings
     model.seqlen = 2048
-    return model
+    return model, tokenizer
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', type=str, help='LLaMA model')
+    parser.add_argument('--model', type=str, help='HuggingFace or SAELens transformer')
+    parser.add_argument("--sae", type=str, default=None, help="Pretrained SAE")
+
     parser.add_argument('--seed', type=int, default=0, help='Seed for sampling the calibration data.')
     parser.add_argument('--nsamples', type=int, default=128, help='Number of calibration samples.')
     parser.add_argument('--sparsity_ratio', type=float, default=0, help='Sparsity level')
-    parser.add_argument("--sparsity_type", type=str, choices=["unstructured", "4:8", "2:4"])
+    parser.add_argument("--sparsity_type", type=str, default="unstructured", choices=["unstructured", "4:8", "2:4"])
     parser.add_argument(
         "--prune_method",
         type=str,
@@ -76,7 +87,6 @@ def main():
     parser.add_argument('--save', type=str, default=None, help='Path to save results.')
     parser.add_argument('--save_model', type=str, default=None, help='Path to save the pruned model.')
 
-    parser.add_argument("--sae_model", type=str, default=None, help="Pretrained SAE identifier")
     parser.add_argument("--concept_noise_k", type=int, default=0, help="Number of concepts to apply noise")
     parser.add_argument("--concept_prune_l", type=int, default=0, help="Number of concepts to prune")
     parser.add_argument("--activation_dataset", type=str, default="c4", help="Dataset for concept activations")
@@ -96,9 +106,8 @@ def main():
 
     model_name = args.model.split("/")[-1]
     logging.info(f"loading llm model {args.model}")
-    model = get_llm(args.model, args.cache_dir, args.device)
+    model, tokenizer = get_llm(args.model, args.cache_dir, args.device, sae_name=args.sae)
     model.eval()
-    tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True)
 
     device = torch.device(args.device)
     if "30b" in args.model or "65b" in args.model:  # for 30b and 65b we use device_map to load onto multiple A6000 GPUs, thus the processing here.
