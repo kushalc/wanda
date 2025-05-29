@@ -1,8 +1,10 @@
 import argparse
 import logging
 import os
+import pickle
 import pprint
 from importlib.metadata import version
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -65,24 +67,21 @@ def main():
 
     parser.add_argument('--seed', type=int, default=0, help='Seed for sampling the calibration data.')
     parser.add_argument('--nsamples', type=int, default=128, help='Number of calibration samples.')
+    parser.add_argument('--nsamples_eval', type=int, default=64, help='Number of calibration samples.')
     parser.add_argument('--sparsity_ratio', type=float, default=0, help='Sparsity level')
     parser.add_argument("--sparsity_type", type=str, default="unstructured", choices=["unstructured", "4:8", "2:4"])
-    parser.add_argument(
-        "--prune_method",
-        type=str,
-        choices=[
-            "magnitude",
-            "wanda",
-            "sparsegpt",
-            "ablate_mag_seq",
-            "ablate_wanda_seq",
-            "ablate_mag_iter",
-            "ablate_wanda_iter",
-            "concept_noise",
-            "concept_prune",
-            "search",
-        ],
-    )
+    parser.add_argument("--prune_method", type=str, choices=[
+        "magnitude",
+        "wanda",
+        "sparsegpt",
+        "ablate_mag_seq",
+        "ablate_wanda_seq",
+        "ablate_mag_iter",
+        "ablate_wanda_iter",
+        "concept_noise",
+        "concept_prune",
+        "search",
+    ])
     parser.add_argument("--cache_dir", default=os.path.expanduser("~/.cache/prune_llm"), type=str)
     parser.add_argument('--use_variant', action="store_true", help="whether to use the wanda variant described in the appendix")
     parser.add_argument('--device', type=str, default="cuda", help='Default device to use.')
@@ -139,26 +138,23 @@ def main():
     ################################################################
 
     metrics = {}
-    metrics["perplexity"] = ppl_test = eval_ppl(args, model, tokenizer, device)
+    metrics["perplexity"] = ppl_test = eval_ppl(args, model, tokenizer, device, nsamples=args.nsamples_eval)
     logging.info(f"wikitext perplexity {ppl_test}")
 
-    if not os.path.exists(args.save):
-        os.makedirs(args.save)
-    pickle.dump(metrics, Path(args.save) / "metrics.pkl")
+    os.makedirs(args.save, exist_ok=True)
+    pickle.dump(metrics, open(Path(args.save) / "metrics.pkl", "wb"))
 
     if args.eval_hallucination_metrics:
-        metrics.update(evaluate_hallucination(model, meta.get("sae"), tokenizer, device))
+        metrics.update(evaluate_hallucination(model, meta.get("sae"), tokenizer, device, nsamples=args.nsamples_eval))
         logging.info("hallucination metrics %s", metrics["accuracy"])
-        pickle.dump(metrics, Path(args.save) / "metrics.pkl")
+        pickle.dump(metrics, open(Path(args.save) / "metrics.pkl", "wb"))
 
+    # FIXME: Supporting HookedTransformer will likely be non-trivial. Do later.
     if args.eval_zero_shot:
-        accelerate = False
-        if "30b" in args.model or "65b" in args.model or "70b" in args.model:
-            accelerate = True
-
         task_list = ["boolq", "rte", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"]
-        metrics.update(eval_zero_shot(args.model, model, tokenizer, task_list, 0, accelerate))
-        pickle.dump(metrics, Path(args.save) / "metrics.pkl")
+        metrics.update(eval_zero_shot(args.model, model, tokenizer, task_list, 0, cache_dir=args.cache_dir,
+                                      nsamples=args.nsamples_eval, device=device))
+        pickle.dump(metrics, open(Path(args.save) / "metrics.pkl", "wb"))
 
     if args.save_model:
         model.save_pretrained(args.save_model)

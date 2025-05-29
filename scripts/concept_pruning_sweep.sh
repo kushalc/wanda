@@ -11,11 +11,13 @@ K=0
 python main.py \
     --model $model \
     --sae $sae \
+    --nsamples_eval 4 \
     --prune_method concept_noise \
     --concept_noise_k $K \
     --activation_dataset c4 \
     --save outputs/$model/K$K-L0 \
     --eval_hallucination_metrics \
+    --eval_zero_shot \
     --device mps
 
 # FIXME: Commented out since pdb doesn't exit unclean.

@@ -1,9 +1,9 @@
 # Import necessary modules
-import fnmatch
 import logging
 import time
 from collections import defaultdict
 
+import lm_eval
 import numpy as np
 import pandas as pd
 import torch
@@ -136,37 +136,24 @@ def eval_ppl_wikitext(model, testenc, bs=1, device=None, nsamples=64):
 
 
 def eval_zero_shot(model_name, model, tokenizer, task_list=["boolq", "rte", "hellaswag", "winogrande", "arc_challenge", "arc_easy", "openbookqa"],
-                   num_fewshot=0, use_accelerate=False, add_special_tokens=False):
-    def pattern_match(patterns, source_list):
-        task_names = set()
-        for pattern in patterns:
-            for matching in fnmatch.filter(source_list, pattern):
-                task_names.add(matching)
-        return list(task_names)
-    task_names = pattern_match(task_list, tasks.ALL_TASKS)
-    model_args = f"pretrained={model_name},cache_dir=./llm_weights"
-    limit = None
+                   num_fewshot=0, cache_dir=None, add_special_tokens=False, nsamples=None, device=None):
+    model_args = [f"pretrained={model_name}", f"cache_dir={cache_dir}"]
     if "70b" in model_name or "65b" in model_name:
-        limit = 2000
-    if use_accelerate:
-        model_args = f"pretrained={model_name},cache_dir=./llm_weights,use_accelerate=True"
-    results = evaluator.simple_evaluate(
-        model="hf-causal-experimental",
-        model_args=model_args,
-        tasks=task_names,
-        num_fewshot=num_fewshot,
-        batch_size=None,
-        device=None,
-        no_cache=True,
-        limit=limit,
-        description_dict={},
-        decontamination_ngrams_path=None,
-        check_integrity=False,
-        pretrained_model=model,
-        tokenizer=tokenizer,
-        add_special_tokens=add_special_tokens
-    )
+        nsamples = 2000
 
+    use_accelerate = False
+    if "30b" in model_name or "65b" in model_name or "70b" in model_name:
+        use_accelerate = True
+    if use_accelerate:
+        model_args += ["use_accelerate=True"]
+
+    # FIXME: Trying to hack in a bunch of stuff to make HookedSAETransformer <=> HFLM compatible, but guessing
+    # there's more nontrivial stitching we have to do.
+    mgr = tasks.TaskManager()
+    results = evaluator.simple_evaluate(model=HookedTransformerLM(model, tokenizer, device=device),
+                                        model_args=",".join(model_args), tasks=mgr.match_tasks(task_list),
+                                        num_fewshot=num_fewshot, batch_size=None, limit=nsamples, device=device,
+                                        task_manager=mgr, check_integrity=False, use_cache=cache_dir)
     return results
 
 
@@ -267,3 +254,87 @@ def evaluate_hallucination(model, sae, tokenizer, device, activation_threshold=1
         "truthful_df": truthful_df[printable_cols],
         "concepts_df": concepts_df,
     }
+
+
+class HookedTransformerLM(lm_eval.api.model.LM):
+    """
+    Wrapper to use a TransformerLens HookedTransformer with lm_eval.
+    Implements loglikelihood, loglikelihood_rolling, and generate_until.
+    """
+
+    def __init__(self, model, tokenizer, device=None):
+        super().__init__()
+        self.model = model
+        self.tokenizer = tokenizer
+        self.device = device or torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
+        self.vocab_size = self.tokenizer.vocab_size if hasattr(self.tokenizer, 'vocab_size') else self.tokenizer.get_vocab().__len__()
+        self._eos_token_id = self.tokenizer.eos_token_id if hasattr(self.tokenizer, 'eos_token_id') else None
+
+    @property
+    def max_length(self):
+        return getattr(self.model, 'seqlen', 2048)
+
+    @property
+    def eot_token_id(self):
+        return self._eos_token_id
+
+    def tok_encode(self, string):
+        return self.tokenizer.encode(string, add_special_tokens=False)
+
+    def tok_decode(self, tokens):
+        return self.tokenizer.decode(tokens)
+
+    def loglikelihood(self, requests):
+        # requests: List of dicts with 'context' and 'continuation' keys
+        res = []
+        for req in requests:
+            context, continuation = req.args
+            input_str = context + continuation
+            input_ids = self.tokenizer(input_str, return_tensors="pt").input_ids.to(self.device)
+            context_ids = self.tokenizer(context, return_tensors="pt").input_ids.to(self.device)
+            with torch.no_grad():
+                logits = self.model(input_ids)[0] if hasattr(self.model(input_ids), 'logits') else self.model(input_ids)
+                log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+
+            cont_len = input_ids.shape[1] - context_ids.shape[1]
+            cont_ids = input_ids[0, -cont_len:]
+            cont_logprobs = log_probs[0, -cont_len-1:-1].gather(1, cont_ids.unsqueeze(-1)).squeeze(-1)
+            total_logprob = cont_logprobs.sum().item()
+            is_greedy = (cont_logprobs.argmax(dim=-1) == cont_ids).all().item()
+            res.append((total_logprob, is_greedy))
+        return res
+
+    def loglikelihood_rolling(self, requests):
+        # For perplexity: requests is a list of strings
+        res = []
+        for string in requests:
+            input_ids = self.tokenizer(string, return_tensors="pt").input_ids.to(self.device)
+            with torch.no_grad():
+                logits = self.model(input_ids)[0] if hasattr(self.model(input_ids), 'logits') else self.model(input_ids)
+                log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+            labels = input_ids[:, 1:]
+            log_probs = log_probs[:, :-1, :]
+            nll = torch.nn.functional.nll_loss(log_probs.reshape(-1, log_probs.size(-1)), labels.reshape(-1), reduction='sum')
+            res.append((-nll.item(), input_ids.shape[1] - 1))
+        return res
+
+    def generate_until(self, requests):
+        # requests: list of dicts with 'context', 'until', 'max_length', 'eos_token_id'
+        results = []
+        for req in requests:
+            context = req["context"]
+            until = req.get("until", [])
+            max_length = req.get("max_length", 20)
+            eos_token_id = req.get("eos_token_id", self.eot_token_id)
+            # Generate tokens
+            output_ids = self.generate(context, max_length, eos_token_id)
+            output_text = self.tok_decode(output_ids)
+            # Truncate at any stop sequence in 'until'
+            for stop_seq in until:
+                idx = output_text.find(stop_seq)
+                if idx != -1:
+                    output_text = output_text[:idx]
+                    break
+            results.append(output_text)
+        return results
