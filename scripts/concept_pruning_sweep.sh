@@ -9,12 +9,13 @@ OUTPUT_DIR="outputs/`date +%Y-%m-%d-%H-%M-%S`"
 # baseline
 for prune_method in magnitude wanda; do
     for sparsity_ratio in 0.500 0.250 0.125 0.064 0.032 0.016 0.008; do
+        # FIXME: Add back hallucination: --eval hallucination zero_shot perplexity
         python main.py \
             --model $base_model \
             --prune_method $prune_method \
             --sparsity_ratio $sparsity_ratio \
             --activation_dataset c4 \
-            --eval hallucination zero_shot perplexity \
+            --eval zero_shot perplexity \
             --nsamples_eval 64 \
             --output_dir $OUTPUT_DIR \
             --device mps

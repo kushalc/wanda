@@ -5,7 +5,7 @@ import time
 import pandas as pd
 import torch
 import torch.nn as nn
-from tqdm.notebook import tqdm
+from tqdm import tqdm
 from transformer_lens import HookedTransformer
 
 from .ablate import AblateGPT
@@ -176,7 +176,7 @@ def prune_magnitude(args, model, tokenizer, device=torch.device("cuda:0"), prune
                         tmp = W_metric[:, ii:(ii+prune_m)].float()
                         W_mask.scatter_(1, ii+torch.topk(tmp, prune_n, dim=1, largest=False)[1], True)
             else:
-                thresh = torch.sort(W_metric.flatten().cuda())[0][int(W.numel()*args.sparsity_ratio)].cpu()
+                thresh = torch.sort(W_metric.flatten().to(device))[0][int(W.numel()*args.sparsity_ratio)].cpu()
                 W_mask = (W_metric <= thresh)
 
             W[W_mask] = 0

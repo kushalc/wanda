@@ -53,7 +53,7 @@ def get_llm(model_name, cache_dir, device, sae_name=None):
         logging.info("Attached SAEs: %s", pprint.pformat(model.acts_to_saes, compact=True))
     else:
         model = AutoModelForCausalLM.from_pretrained(model_name, device_map=device, **kwargs)
-        tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True)
+        tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
 
     # NOTE: Modern models have significantly longer context windows and C4 doesn't have enough
     # examples that exceed these.

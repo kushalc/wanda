@@ -181,6 +181,9 @@ def eval_hallucination(args, model, tokenizer, activation_threshold=1.0, sae=Non
         with torch.no_grad():
             tokens = tokenizer(batch_prompts, return_tensors="pt", padding="longest",
                                truncation=True, max_length=model.seqlen).to(args.device)
+
+            # FIXME: Either need to re-implement this method or provide parallel implementation for
+            # prune_magnitude and prune_wanda. Do latter for stricter comparability.
             hook_name = sae.cfg.hook_name + ".hook_sae_acts_post"
             logits, cache = model.run_with_cache(tokens.input_ids, return_type="logits",
                                                  return_cache_object=True, names_filter=[hook_name])
