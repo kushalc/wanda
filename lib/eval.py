@@ -17,13 +17,11 @@ from utilities.etl import load_truthfulqa
 # Import get_loaders function from data module within the same directory
 from .data import get_loaders
 
+TASK_LIST = ["boolq", "rte", "hellaswag", "winogrande", "arc_challenge", "arc_easy", "openbookqa"]
+
 
 # Function to evaluate perplexity (ppl) on a specified model and tokenizer
-def eval_ppl(args, model, tokenizer, device=torch.device("cuda:0"), nsamples=64):
-    # Set dataset
-    dataset = "wikitext2"
-
-    # Print status
+def eval_perplexity(args, model, tokenizer, batch_size=32, dataset="wikitext2", **kwargs):
     logging.info(f"evaluating on {dataset}")
 
     # Get the test loader
@@ -31,13 +29,15 @@ def eval_ppl(args, model, tokenizer, device=torch.device("cuda:0"), nsamples=64)
 
     # Evaluate ppl in no grad context to avoid updating the model
     with torch.no_grad():
-        ppl_test = eval_ppl_wikitext(model, testloader, 1, device, nsamples=nsamples)
-    return ppl_test
+        ppl_test = _eval_ppl_wikitext(model, testloader, 1, args.device, nsamples=args.nsamples_eval)
+    return {
+        "perplexity": ppl_test,
+    }
 
 # Function to evaluate perplexity (ppl) specifically on the wikitext dataset
 
 
-def eval_ppl_wikitext_train(model, trainloader, bs=1, device=None):
+def _eval_ppl_wikitext_train(model, trainloader, bs=1, device=None):
     # Get input IDs
     # testenc = testenc.input_ids
 
@@ -88,7 +88,7 @@ def eval_ppl_wikitext_train(model, trainloader, bs=1, device=None):
 # Function to evaluate perplexity (ppl) specifically on the wikitext dataset
 
 
-def eval_ppl_wikitext(model, testenc, bs=1, device=None, nsamples=64):
+def _eval_ppl_wikitext(model, testenc, bs=1, device=None, nsamples=64):  # NOTE: bs=1 is different than batch_size above...
     # Get input IDs
     testenc = testenc.input_ids
 
@@ -135,30 +135,23 @@ def eval_ppl_wikitext(model, testenc, bs=1, device=None, nsamples=64):
     return ppl.item()
 
 
-def eval_zero_shot(model_name, model, tokenizer, task_list=["boolq", "rte", "hellaswag", "winogrande", "arc_challenge", "arc_easy", "openbookqa"],
-                   num_fewshot=0, cache_dir=None, add_special_tokens=False, nsamples=None, device=None):
-    model_args = [f"pretrained={model_name}", f"cache_dir={cache_dir}"]
-    if "70b" in model_name or "65b" in model_name:
-        nsamples = 2000
-
-    use_accelerate = False
-    if "30b" in model_name or "65b" in model_name or "70b" in model_name:
-        use_accelerate = True
+def eval_zero_shot(args, model, tokenizer, num_fewshot=0, batch_size=32, use_accelerate=False, **kwargs):
+    model_args = [f"cache_dir={args.cache_dir}"]
     if use_accelerate:
         model_args += ["use_accelerate=True"]
 
     # FIXME: Trying to hack in a bunch of stuff to make HookedSAETransformer <=> HFLM compatible, but guessing
     # there's more nontrivial stitching we have to do.
     mgr = tasks.TaskManager()
-    results = evaluator.simple_evaluate(model=HookedTransformerLM(model, tokenizer, device=device),
-                                        model_args=",".join(model_args), tasks=mgr.match_tasks(task_list),
-                                        num_fewshot=num_fewshot, batch_size=None, limit=nsamples, device=device,
-                                        task_manager=mgr, check_integrity=False, use_cache=cache_dir)
+    results = evaluator.simple_evaluate(model=HookedTransformerLM(model, tokenizer, device=args.device),
+                                        model_args=",".join(model_args), tasks=mgr.match_tasks(TASK_LIST),
+                                        num_fewshot=num_fewshot, check_integrity=False, limit=args.nsamples_eval,
+                                        batch_size=batch_size, device=args.device, task_manager=mgr,
+                                        use_cache=None)  # NOTE: Don't want corruption-unaware cache
     return results
 
 
-def evaluate_hallucination(model, sae, tokenizer, device, activation_threshold=1.0,
-                           nsamples=64, batch_size=32):
+def eval_hallucination(args, model, tokenizer, activation_threshold=1.0, sae=None, batch_size=32, **kwargs):
     """
     Evaluate hallucination on TruthfulQA using SAE concepts and logprobs, batching to save memory.
     Args:
@@ -172,7 +165,7 @@ def evaluate_hallucination(model, sae, tokenizer, device, activation_threshold=1
         dict with accuracy and concept activation stats
     """
     truthful_df = load_truthfulqa(mc=True, preset="null")
-    sampled_idx = np.random.choice(truthful_df["core_prompt_idx"].unique(), size=nsamples, replace=False)
+    sampled_idx = np.random.choice(truthful_df["core_prompt_idx"].unique(), size=args.nsamples_eval, replace=False)
     truthful_df = truthful_df[truthful_df["core_prompt_idx"].isin(sampled_idx)]
 
     # Prepare all prompt texts and answer types
@@ -187,7 +180,7 @@ def evaluate_hallucination(model, sae, tokenizer, device, activation_threshold=1
         batch_prompts = prompts[start:end]
         with torch.no_grad():
             tokens = tokenizer(batch_prompts, return_tensors="pt", padding="longest",
-                               truncation=True, max_length=model.seqlen).to(device)
+                               truncation=True, max_length=model.seqlen).to(args.device)
             hook_name = sae.cfg.hook_name + ".hook_sae_acts_post"
             logits, cache = model.run_with_cache(tokens.input_ids, return_type="logits",
                                                  return_cache_object=True, names_filter=[hook_name])

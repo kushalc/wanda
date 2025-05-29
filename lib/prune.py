@@ -59,7 +59,11 @@ def _check_sparsity__hookedtransformer(model):
     total_sparsity = count / total if total > 0 else 0.0
     logging.info("Calculating %.6f total sparsity, block-level sparsity=\n%s",
                  total_sparsity, block_sparsity_df.to_string())
-    return total_sparsity
+    return total_sparsity, {
+        "ratio": total_sparsity,
+        "block_sparsity_df": block_sparsity_df,
+        "type_sparsity_df": type_sparsity_df,
+    }
 
 
 def _check_sparsity__standard(model):
@@ -86,7 +90,10 @@ def _check_sparsity__standard(model):
         logging.info(f"layer {i} sparsity {float(sub_count)/sub_params:.6f}")
 
     model.config.use_cache = use_cache
-    return float(count)/total_params
+    ratio = float(count)/total_params
+    return ratio, {
+        "ratio": ratio,
+    }
 
 
 def check_sparsity(model):
