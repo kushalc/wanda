@@ -9,6 +9,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as nnf
+from lm_eval import evaluator, tasks
 from tqdm import tqdm
 
 from utilities.etl import load_truthfulqa
@@ -18,7 +19,7 @@ from .data import get_loaders
 
 
 # Function to evaluate perplexity (ppl) on a specified model and tokenizer
-def eval_ppl(args, model, tokenizer, device=torch.device("cuda:0")):
+def eval_ppl(args, model, tokenizer, device=torch.device("cuda:0"), nsamples=64):
     # Set dataset
     dataset = "wikitext2"
 
@@ -26,13 +27,11 @@ def eval_ppl(args, model, tokenizer, device=torch.device("cuda:0")):
     logging.info(f"evaluating on {dataset}")
 
     # Get the test loader
-    _, testloader = get_loaders(
-        dataset, seed=0, seqlen=model.seqlen, tokenizer=tokenizer
-    )
+    _, testloader = get_loaders(dataset, seed=0, seqlen=model.seqlen, tokenizer=tokenizer)
 
     # Evaluate ppl in no grad context to avoid updating the model
     with torch.no_grad():
-        ppl_test = eval_ppl_wikitext(model, testloader, 1, device)
+        ppl_test = eval_ppl_wikitext(model, testloader, 1, device, nsamples=nsamples)
     return ppl_test
 
 # Function to evaluate perplexity (ppl) specifically on the wikitext dataset
@@ -89,16 +88,16 @@ def eval_ppl_wikitext_train(model, trainloader, bs=1, device=None):
 # Function to evaluate perplexity (ppl) specifically on the wikitext dataset
 
 
-def eval_ppl_wikitext(model, testenc, bs=1, device=None):
+def eval_ppl_wikitext(model, testenc, bs=1, device=None, nsamples=64):
     # Get input IDs
     testenc = testenc.input_ids
 
     # Calculate number of samples
-    nsamples = testenc.numel() // model.seqlen
+    if nsamples is None:
+        nsamples = testenc.numel() // model.seqlen
 
     # List to store negative log likelihoods
     nlls = []
-    logging.info(f"nsamples {nsamples}")
 
     # Loop through each batch
     for i in tqdm(range(0, nsamples, bs)):
@@ -138,8 +137,6 @@ def eval_ppl_wikitext(model, testenc, bs=1, device=None):
 
 def eval_zero_shot(model_name, model, tokenizer, task_list=["boolq", "rte", "hellaswag", "winogrande", "arc_challenge", "arc_easy", "openbookqa"],
                    num_fewshot=0, use_accelerate=False, add_special_tokens=False):
-    from lm_eval import evaluator, tasks
-
     def pattern_match(patterns, source_list):
         task_names = set()
         for pattern in patterns:
@@ -173,7 +170,8 @@ def eval_zero_shot(model_name, model, tokenizer, task_list=["boolq", "rte", "hel
     return results
 
 
-def evaluate_hallucination(model, sae, tokenizer, device, activation_threshold=1.0, batch_size=32):
+def evaluate_hallucination(model, sae, tokenizer, device, activation_threshold=1.0,
+                           nsamples=64, batch_size=32):
     """
     Evaluate hallucination on TruthfulQA using SAE concepts and logprobs, batching to save memory.
     Args:
@@ -187,7 +185,7 @@ def evaluate_hallucination(model, sae, tokenizer, device, activation_threshold=1
         dict with accuracy and concept activation stats
     """
     truthful_df = load_truthfulqa(mc=True, preset="null")
-    sampled_idx = np.random.choice(truthful_df["core_prompt_idx"].unique(), size=10, replace=False)
+    sampled_idx = np.random.choice(truthful_df["core_prompt_idx"].unique(), size=nsamples, replace=False)
     truthful_df = truthful_df[truthful_df["core_prompt_idx"].isin(sampled_idx)]
 
     # Prepare all prompt texts and answer types
