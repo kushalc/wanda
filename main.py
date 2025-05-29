@@ -3,12 +3,14 @@ import logging
 import os
 import pickle
 import pprint
+import time
 from importlib.metadata import version
 from pathlib import Path
 
+import lib.eval
 import numpy as np
+import pandas as pd
 import torch
-from lib.eval import eval_ppl, eval_zero_shot, evaluate_hallucination
 from lib.prune import (check_sparsity, find_layers, prune_ablate,
                        prune_concept_noise, prune_concept_prune,
                        prune_magnitude, prune_sparsegpt, prune_wanda)
@@ -85,15 +87,14 @@ def main():
     parser.add_argument("--cache_dir", default=os.path.expanduser("~/.cache/prune_llm"), type=str)
     parser.add_argument('--use_variant', action="store_true", help="whether to use the wanda variant described in the appendix")
     parser.add_argument('--device', type=str, default="cuda", help='Default device to use.')
-    parser.add_argument('--save', type=str, default=None, help='Path to save results.')
-    parser.add_argument('--save_model', type=str, default=None, help='Path to save the pruned model.')
+    parser.add_argument('--output_dir', type=str, default=None, help='Path to save results.')
 
     parser.add_argument("--concept_noise_k", type=int, default=0, help="Number of concepts to apply noise")
     parser.add_argument("--concept_prune_l", type=int, default=0, help="Number of concepts to prune")
     parser.add_argument("--activation_dataset", type=str, default="c4", help="Dataset for concept activations")
-    parser.add_argument("--eval_hallucination_metrics", action="store_true", help="Compute hallucination metrics")
-    parser.add_argument("--eval_zero_shot", action="store_true")
+    parser.add_argument("--eval", nargs="+", choices=["perplexity", "zero_shot", "hallucination"], help="Calculate chosen metrics")
     args = parser.parse_args()
+    args.output_dir = Path(args.output_dir)
 
     # Setting seeds for reproducibility
     np.random.seed(args.seed)
@@ -105,8 +106,8 @@ def main():
         assert args.sparsity_ratio == 0.5, "sparsity ratio must be 0.5 for structured N:M sparsity"
         prune_n, prune_m = map(int, args.sparsity_type.split(":"))
 
-    model_name = args.model.split("/")[-1]
-    logging.info(f"loading llm model {args.model}")
+    started_at = time.time()
+    logging.info("Loading llm model %s", args.model)
     model, tokenizer, meta = get_llm(args.model, args.cache_dir, args.device, sae_name=args.sae)
     model.eval()
 
@@ -130,35 +131,28 @@ def main():
         elif args.prune_method == "concept_prune":
             prune_concept_prune(args, model, tokenizer, device)
 
-    ################################################################
-    logging.info("*"*30)
-    sparsity_ratio = check_sparsity(model)
-    logging.info(f"sparsity sanity check {sparsity_ratio:.4f}")
-    logging.info("*"*30)
-    ################################################################
+    _, sparsity_meta = check_sparsity(model)
+    metrics = {
+        "args": vars(args),
+        "executed_at": pd.Timestamp.now(),
+        "duration": time.time() - started_at,
+        "sparsity": sparsity_meta,
+    }
+    os.makedirs(args.output_dir, exist_ok=True)
+    metrics_path = args.output_dir / metrics["executed_at"].strftime("%Y-%m-%d-%H-%M-%S.pkl")
+    logging.info("Saving results to %s", metrics_path)
+    pickle.dump(metrics, open(metrics_path, "wb"))
 
-    metrics = {}
-    metrics["perplexity"] = ppl_test = eval_ppl(args, model, tokenizer, device, nsamples=args.nsamples_eval)
-    logging.info(f"wikitext perplexity {ppl_test}")
-
-    os.makedirs(args.save, exist_ok=True)
-    pickle.dump(metrics, open(Path(args.save) / "metrics.pkl", "wb"))
-
-    if args.eval_hallucination_metrics:
-        metrics.update(evaluate_hallucination(model, meta.get("sae"), tokenizer, device, nsamples=args.nsamples_eval))
-        logging.info("hallucination metrics %s", metrics["accuracy"])
-        pickle.dump(metrics, open(Path(args.save) / "metrics.pkl", "wb"))
-
-    # FIXME: Supporting HookedTransformer will likely be non-trivial. Do later.
-    if args.eval_zero_shot:
-        task_list = ["boolq", "rte", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"]
-        metrics.update(eval_zero_shot(args.model, model, tokenizer, task_list, 0, cache_dir=args.cache_dir,
-                                      nsamples=args.nsamples_eval, device=device))
-        pickle.dump(metrics, open(Path(args.save) / "metrics.pkl", "wb"))
-
-    if args.save_model:
-        model.save_pretrained(args.save_model)
-        tokenizer.save_pretrained(args.save_model)
+    for name in args.eval:
+        try:
+            started_at = time.time()
+            name = f"lib.eval.eval_{name}"
+            logging.info("Starting eval=%s", name)
+            metrics[name] = eval(name)(args, model, tokenizer, sae=meta.get("sae"))
+            metrics[name]["duration"] = time.time() - started_at
+        except:
+            logging.warning("Couldn't run eval: %s", name, exc_info=True)
+        pickle.dump(metrics, open(metrics_path, "wb"))
 
 
 if __name__ == '__main__':
